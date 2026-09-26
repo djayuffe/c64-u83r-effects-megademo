@@ -38,6 +38,24 @@ make run
 x64sc build/c64_u83r_effects_megademo.prg
 ```
 
+## Reproducible effect captures
+
+The repository includes a VICE framebuffer capture helper. It builds each
+effect as an isolated preview, then reads the running emulator's indexed
+framebuffer and palette through VICE's local binary monitor. This avoids using
+illustrations in place of actual demo output.
+
+```sh
+python3 scripts/capture_previews.py
+```
+
+The command requires VICE `x64sc` (3.6 or later) and writes one PNG per effect
+to `docs/effects/`. To capture a single zero-based effect index instead:
+
+```sh
+python3 scripts/capture_previews.py --effect 0
+```
+
 ## Design and safety
 
 - The executable loads at `$0801` and starts at `$4000` through `SYS 16384`.

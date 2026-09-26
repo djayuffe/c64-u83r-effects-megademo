@@ -93,7 +93,11 @@ Start:
         jsr ClearColor
         jsr SID_Init
         jsr IRQ_Init
+!ifdef START_PART {
+        lda #START_PART
+} else {
         lda #0
+}
         sta Part
         jsr LoadPart
         cli
