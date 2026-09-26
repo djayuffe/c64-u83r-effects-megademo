@@ -10,5 +10,6 @@ root_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root_dir"
 mkdir -p build/previews
 acme --strict-segments -DSTART_PART="$1" -f cbm \
+    -l "build/previews/effect-$1.labels" \
     -o "build/previews/effect-$1.prg" c64_u83r_effects_megademo.s
 python3 scripts/verify_prg.py "build/previews/effect-$1.prg"

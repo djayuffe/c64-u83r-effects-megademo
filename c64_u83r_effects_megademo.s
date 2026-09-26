@@ -1,5 +1,5 @@
 ; ================================================================
-; C64 U83R Effects Megademo v1.0.0
+; C64 U83R Effects Megademo v1.0.1
 ; Sixteen effects with a shared IRQ, SID routine, custom text charset, and two
 ; bitmap-bank finales. Runtime code starts at $4000; text uses screen $0400 and
 ; charset $2000. Bitmap effects use VIC bank 2 with screen $8400 and bitmap $a000.
@@ -163,10 +163,21 @@ ForceVICTextBank_Fast:
         jmp ForceVICTextBank_Hard
 
 ForceVICForCurrentPart:
-        ; allow dangerous bitmap/bank-switch effects only for the final risky parts.
+        ; Allow dangerous bitmap effects only for the final risky parts. The
+        ; final part deliberately alternates modes, so its IRQ must preserve
+        ; the phase selected by BS_Update rather than forcing bitmap every
+        ; frame.
         lda Part
+        cmp #15
+        beq ForceVICBankSwitcher
         cmp #RISKY_BITMAP_FIRST
         bcs ForceVICBitmapBank2
+        jmp ForceVICTextBank
+
+ForceVICBankSwitcher:
+        lda LocalTick
+        and #$08
+        beq ForceVICBitmapBank2
         jmp ForceVICTextBank
 
 ForceVICBitmapBank2:
@@ -312,6 +323,9 @@ IRQ_Init:
         rts
 
 IRQ_Main:
+        ; Preserve the working registers used below. The KERNAL's IRQ stub
+        ; keeps its own X/Y/status frame below these values; restoring this
+        ; local frame before jumping to $ea31 leaves that KERNAL frame intact.
         pha
         txa
         pha

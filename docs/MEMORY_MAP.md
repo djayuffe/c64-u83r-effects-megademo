@@ -4,7 +4,7 @@
 | --- | --- |
 | `$0801–$080F` | BASIC loader (`10 SYS 16384`) |
 | `$2000–$27FF` | Generated text charset in VIC bank 0 |
-| `$4000–$5DDF` | Program code, state, dispatch tables, and effect data in the verified v1.0.0 build |
+| `$4000–$5DED` | Program code, state, dispatch tables, and effect data in the verified v1.0.1 build |
 | `$8400–$87E7` | Hires bitmap screen memory in VIC bank 2 |
 | `$A000–$BFFF` | Hires bitmap pixels in VIC bank 2 |
 | `$D000–$D7FF` | VIC-II and SID registers / character-ROM window during initialization |

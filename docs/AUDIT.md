@@ -12,6 +12,7 @@ The verified input PRG was 21,984 bytes, loaded at `$0801`, and ended at `$5DDF`
 2. Its root contained multiple equivalent build/run wrappers and mutually stale FIX92–FIX95 documentation.
 3. Builds did not use ACME strict segment checks, had no source-level invariant test, and wrote the PRG beside the source.
 4. The public-facing README referred to a transient “FIX95” delivery name instead of a stable project identity.
+5. The final bitmap/text switcher selected its text phase during its update but the shared IRQ immediately forced bitmap mode again, making the text phase unstable.
 
 ## Corrections
 
@@ -19,7 +20,9 @@ The verified input PRG was 21,984 bytes, loaded at `$0801`, and ended at `$5DDF`
 - Replaced duplicated wrappers with `make build`, `make check`, and `make run`.
 - Added static validation for 16-part dispatch tables, IRQ/VIC restoration, the character-ROM copy path, and bitmap-bank boundaries.
 - Added strict assembly, PRG loader verification, a runtime memory guard, current documentation, and a `.gitignore` for generated files.
-- Renamed the project to **C64 U83R Effects Megademo v1.0.0**.
+- Renamed the project to **C64 U83R Effects Megademo** and released the audited baseline as v1.0.0.
+- Corrected the final switcher's IRQ mode selection so it follows `LocalTick` and preserves both text and bitmap phases.
+- Extended the VICE preview audit to boot through BASIC `SYS 16384` and assert the CINV IRQ vector, frame/update progress, CPU mapping, CIA2 bank selection, and VIC mode/pointer bits for every effect.
 
 ## Existing-repository comparison
 
@@ -29,7 +32,7 @@ The existing `djayuffe/c64-u83r-rul3z-new-effects` repository is a four-effect t
 
 ```text
 PASS: source defines 16 dispatchable effects and preserves the IRQ/VIC-bank safety contract.
-PASS: build/c64_u83r_effects_megademo.prg is 21984 bytes, loads at $0801, SYSes $4000, and ends at $5ddf.
+PASS: build/c64_u83r_effects_megademo.prg is 21998 bytes, loads at $0801, SYSes $4000, and ends at $5ded.
 ```
 
-VICE was not used as a pass/fail check because its macOS graphics backend cannot initialize an unattended display in this environment. Assembly and the source/PRG checks are reproducible; visual timing should be inspected interactively in VICE or on C64 hardware.
+The VICE capture runner was then executed for all 16 isolated start states. Each preview booted through `SYS 16384`, advanced its raster IRQ and effect update loop, installed `IRQ_Main` at `$0314/$0315`, and selected the expected text bank 0 or bitmap bank 2 mode. The resulting screenshots are tracked in `docs/effects/`.

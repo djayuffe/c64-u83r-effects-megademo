@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import re
 import shutil
 import socket
 import struct
@@ -71,13 +72,45 @@ def response(connection: socket.socket, expected_type: int, request_id: int) -> 
             return body
 
 
-def query_display(port: int) -> tuple[bytes, list[tuple[int, int, int]], tuple[int, int, int, int]]:
+def query_display(
+    port: int, addresses: dict[str, int]
+) -> tuple[bytes, list[tuple[int, int, int]], tuple[int, int, int, int], dict[str, int]]:
     with socket.create_connection(("127.0.0.1", port), timeout=5) as connection:
         connection.settimeout(10)
-        connection.sendall(packet(0x84, b"\x01\x00", 1))
-        display = response(connection, 0x84, 1)
-        connection.sendall(packet(0x91, b"\x01", 2))
-        palette_reply = response(connection, 0x91, 2)
+        connection.sendall(packet(0x82, b"", 1))
+        bank_reply = response(connection, 0x82, 1)
+        bank_count = struct.unpack_from("<H", bank_reply, 0)[0]
+        offset = 2
+        banks: dict[str, int] = {}
+        for _ in range(bank_count):
+            item_size = bank_reply[offset]
+            bank_id = struct.unpack_from("<H", bank_reply, offset + 1)[0]
+            name_length = bank_reply[offset + 3]
+            name = bank_reply[offset + 4:offset + 4 + name_length].decode("ascii")
+            banks[name.lower()] = bank_id
+            offset += item_size + 1
+        if "io" not in banks:
+            raise RuntimeError(f"VICE did not expose an I/O memory bank: {sorted(banks)}")
+
+        def read_byte(address: int, request_id: int, bank: int = 0) -> int:
+            body = b"\x00" + struct.pack("<HHB", address, address, 0) + struct.pack("<H", bank)
+            connection.sendall(packet(0x01, body, request_id))
+            reply = response(connection, 0x01, request_id)
+            if struct.unpack_from("<H", reply, 0)[0] != 1:
+                raise RuntimeError(f"VICE did not return one byte from ${address:04x}")
+            return reply[2]
+
+        io_registers = {"vic_irq_enable", "ctrl1", "ctrl2", "memptr", "cia2_pra", "cia2_ddr"}
+        runtime = {
+            name: read_byte(address, request_id, banks["io"] if name in io_registers else 0)
+            for request_id, (name, address) in enumerate(addresses.items(), start=2)
+        }
+        request_id = len(runtime) + 2
+        connection.sendall(packet(0x84, b"\x01\x00", request_id))
+        display = response(connection, 0x84, request_id)
+        request_id += 1
+        connection.sendall(packet(0x91, b"\x01", request_id))
+        palette_reply = response(connection, 0x91, request_id)
 
     fields = struct.unpack_from("<IHHHHHHBI", display, 0)
     field_len, debug_width, debug_height, x_offset, y_offset, inner_width, inner_height, bits, data_len = fields
@@ -106,24 +139,62 @@ def query_display(port: int) -> tuple[bytes, list[tuple[int, int, int]], tuple[i
     for y_coord in range(y_offset, y_offset + inner_height):
         start = y_coord * debug_width + x_offset
         cropped.extend(image[start:start + inner_width])
-    return bytes(cropped), palette, (inner_width, inner_height, debug_width, debug_height)
+    return bytes(cropped), palette, (inner_width, inner_height, debug_width, debug_height), runtime
 
 
-def query_memory(port: int, start: int, end: int) -> bytes:
-    with socket.create_connection(("127.0.0.1", port), timeout=5) as connection:
-        connection.settimeout(10)
-        body = b"\x00" + struct.pack("<HHB", start, end, 0) + b"\x00\x00"
-        connection.sendall(packet(0x01, body, 1))
-        reply = response(connection, 0x01, 1)
-    length = struct.unpack_from("<H", reply, 0)[0]
-    contents = reply[2:2 + length]
-    if len(contents) != end - start + 1:
-        raise RuntimeError(f"VICE returned {len(contents)} bytes for ${start:04x}-${end:04x}")
-    return contents
+def symbol_address(label_file: Path, symbol: str) -> int:
+    match = re.search(rf"^\s*{re.escape(symbol)}\s*=\s*\$([0-9a-fA-F]+)", label_file.read_text(), re.MULTILINE)
+    if not match:
+        raise RuntimeError(f"missing {symbol} in {label_file}")
+    return int(match.group(1), 16)
+
+
+def verify_runtime(effect_index: int, runtime: dict[str, int], irq_address: int) -> None:
+    """Assert the C64 state that protects boot, IRQ, VIC mode, and bank use."""
+    if runtime["part"] != effect_index:
+        raise RuntimeError(f"preview selected part {runtime['part']}, expected {effect_index}")
+    if runtime["frame"] == 0 or runtime["local_tick"] == 0:
+        raise RuntimeError(
+            "preview did not advance its IRQ/effect loop: "
+            f"frame={runtime['frame']}, local_tick={runtime['local_tick']}"
+        )
+    if runtime["cpu_port"] != 0x37:
+        raise RuntimeError(f"CPU port is ${runtime['cpu_port']:02x}, expected $37")
+    vector = runtime["irq_vector_lo"] | (runtime["irq_vector_hi"] << 8)
+    if vector != irq_address:
+        raise RuntimeError(f"IRQ vector is ${vector:04x}, expected ${irq_address:04x}")
+    if runtime["vic_irq_enable"] & 0x01 == 0:
+        raise RuntimeError("raster IRQ is not enabled in $d01a")
+    if runtime["cia2_ddr"] & 0x03 != 0x03:
+        raise RuntimeError(f"CIA2 bank-select pins are not outputs: $dd02=${runtime['cia2_ddr']:02x}")
+
+    text_mode = effect_index < 14 or (effect_index == 15 and runtime["local_tick"] & 0x08)
+    expected_bank = 0x03 if text_mode else 0x01
+    expected_ctrl1 = 0x1B if text_mode else 0x3B
+    expected_vic_mode = 0x00 if text_mode else 0x01
+    mode_name = "text bank 0" if text_mode else "bitmap bank 2"
+    if runtime["vic_mode"] != expected_vic_mode:
+        raise RuntimeError(f"{mode_name} has VICMode=${runtime['vic_mode']:02x}")
+    if runtime["cia2_pra"] & 0x03 != expected_bank:
+        raise RuntimeError(f"{mode_name} selected CIA2 bank ${runtime['cia2_pra'] & 0x03:02x}")
+    if runtime["ctrl1"] & 0x7F != expected_ctrl1:
+        raise RuntimeError(f"{mode_name} selected $d011=${runtime['ctrl1']:02x}")
+    # VICE exposes undocumented/read-only bits in VIC registers.  Only mask
+    # the bits that select the display mode and memory pointers.
+    if runtime["ctrl2"] & 0x18 != 0x08 or runtime["memptr"] & 0xF8 != 0x18:
+        raise RuntimeError(
+            f"{mode_name} selected $d016/${runtime['ctrl2']:02x} and $d018/${runtime['memptr']:02x}"
+        )
 
 
 def load_and_run_preview(port: int, program: Path) -> None:
-    """Load a PRG through VICE's monitor and start it at its SYS entrypoint."""
+    """Load a PRG and enter its documented BASIC SYS command in VICE.
+
+    Starting at $4000 by changing the CPU's program counter bypasses BASIC's
+    normal JSR frame.  That frame matters because the program chains its IRQ
+    through the KERNAL.  Feed the same `SYS 16384` command as a real user
+    instead, so the preview exercises the actual boot and interrupt contract.
+    """
     prg = program.read_bytes()
     load_address = struct.unpack_from("<H", prg, 0)[0]
     payload = prg[2:]
@@ -138,11 +209,9 @@ def load_and_run_preview(port: int, program: Path) -> None:
             connection.sendall(packet(0x02, body, request_id))
             response(connection, 0x02, request_id)
             request_id += 1
-        # Main-memory PC is register ID 3 in VICE's C64 monitor. The program's
-        # BASIC stub calls SYS 16384, so use that same verified entrypoint.
-        set_pc = b"\x00" + struct.pack("<H", 1) + bytes((3, 3)) + struct.pack("<H", 0x4000)
-        connection.sendall(packet(0x32, set_pc, request_id))
-        response(connection, 0x31, request_id)
+        command = b"SYS 16384\r"
+        connection.sendall(packet(0x72, bytes((len(command),)) + command, request_id))
+        response(connection, 0x72, request_id)
         request_id += 1
         connection.sendall(packet(0xAA, b"", request_id))
         response(connection, 0xAA, request_id)
@@ -169,6 +238,7 @@ def capture(effect_index: int, x64sc: str) -> Path:
     subprocess.run(["sh", "scripts/build_preview.sh", str(effect_index)], cwd=ROOT, check=True)
     port = 16502 + effect_index
     prg = ROOT / "build" / "previews" / f"effect-{effect_index}.prg"
+    labels = ROOT / "build" / "previews" / f"effect-{effect_index}.labels"
     process = subprocess.Popen(
         [x64sc, "-sounddev", "dummy", "-binarymonitor", "-binarymonitoraddress",
          f"ip4://127.0.0.1:{port}"],
@@ -184,10 +254,23 @@ def capture(effect_index: int, x64sc: str) -> Path:
             raise RuntimeError(f"VICE exited with code {process.returncode}")
         load_and_run_preview(port, prg)
         time.sleep(3.0)
-        state = query_memory(port, 0x53C9, 0x53CE)
-        if state[3] == 0:
-            raise RuntimeError(f"preview did not receive a raster IRQ: state={state.hex()}")
-        pixels, palette, dimensions = query_display(port)
+        addresses = {
+            "part": symbol_address(labels, "Part"),
+            "frame": symbol_address(labels, "Frame"),
+            "local_tick": symbol_address(labels, "LocalTick"),
+            "vic_mode": symbol_address(labels, "VICMode"),
+            "cpu_port": 0x0001,
+            "irq_vector_lo": 0x0314,
+            "irq_vector_hi": 0x0315,
+            "vic_irq_enable": 0xD01A,
+            "ctrl1": 0xD011,
+            "ctrl2": 0xD016,
+            "memptr": 0xD018,
+            "cia2_pra": 0xDD00,
+            "cia2_ddr": 0xDD02,
+        }
+        pixels, palette, dimensions, runtime = query_display(port, addresses)
+        verify_runtime(effect_index, runtime, symbol_address(labels, "IRQ_Main"))
     finally:
         process.terminate()
         try:

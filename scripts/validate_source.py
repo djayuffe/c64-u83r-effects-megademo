@@ -32,6 +32,16 @@ require("sta CPU_PORT" in source and "lda #$33" in source, "character ROM copy m
 require("jsr ExitRiskyModeClean" in source, "risky-mode exit contract is not used")
 require("jsr ForceVICForCurrentPart" in source, "IRQ must restore the VIC setup for the active part")
 require("jmp $ea31" in source, "IRQ must return through the KERNAL IRQ epilogue")
+require("!ifdef START_PART {" in source, "preview/start-part build hook is missing")
+require("ForceVICBankSwitcher:" in source, "bitmap/text switcher VIC-mode selector is missing")
+require(
+    re.search(r"ForceVICBankSwitcher:\s+lda LocalTick\s+and #\$08", source) is not None,
+    "bitmap/text switcher must derive its VIC mode from LocalTick",
+)
+require(
+    re.search(r"lda #<IRQ_Main\s+sta \$0314\s+lda #>IRQ_Main\s+sta \$0315", source) is not None,
+    "IRQ vector must point to IRQ_Main through the KERNAL CINV vector",
+)
 
 for table in ("InitLo", "InitHi", "UpdLo", "UpdHi", "DurLo", "DurHi", "MusicStart"):
     require(byte_table_count(table) == 16, f"{table} must have exactly 16 entries")
